@@ -102,7 +102,7 @@ if __name__ == '__main__':
     schedule(
         *jobs,
         name='Evaluation',
-        backend='slurm',
+        backend='async',
         prune=True,
         export='ALL',
     )

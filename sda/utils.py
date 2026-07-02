@@ -97,11 +97,13 @@ def loop(
     weight_decay: float = 1e-3,
     scheduler: float = 'linear',
     device: str = 'cpu',
+    num_workers: int = 1,
     **absorb,
 ) -> Iterator:
     # Data
-    trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=1, persistent_workers=True)
-    validloader = DataLoader(validset, batch_size=batch_size, shuffle=True, num_workers=1, persistent_workers=True)
+    persistent = num_workers > 0
+    trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers, persistent_workers=persistent)
+    validloader = DataLoader(validset, batch_size=batch_size, shuffle=True, num_workers=num_workers, persistent_workers=persistent)
 
     # Optimizer
     if optimizer == 'AdamW':

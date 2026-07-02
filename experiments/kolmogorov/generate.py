@@ -59,7 +59,7 @@ if __name__ == '__main__':
     schedule(
         aggregate,
         name='Data generation',
-        backend='slurm',
+        backend='async',
         prune=True,
         export='ALL',
     )

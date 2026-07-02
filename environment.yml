@@ -12,6 +12,7 @@ dependencies:
   - pytorch=1.13.1
   - pytorch-cuda=11.7
   - pip:
+    - --find-links https://storage.googleapis.com/jax-releases/jax_releases.html
     - dawgz==0.4.1
     - jax==0.4.4
     - jaxlib==0.4.4

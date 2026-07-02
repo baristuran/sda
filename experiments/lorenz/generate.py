@@ -38,6 +38,6 @@ if __name__ == '__main__':
     schedule(
         simulate,
         name='Data generation',
-        backend='slurm',
+        backend='async',
         export='ALL',
     )

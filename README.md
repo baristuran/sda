@@ -37,6 +37,8 @@ The [sda](sda) directory contains the implementations of the [dynamical systems]
 
 The [lorenz](experiments/lorenz) and [kolmogorov](experiments/kolmogorov) directories contain the scripts for the experiments (data generation, training and evaluation) as well as the notebooks that produced the figures of the paper.
 
+The [rayleigh-benard](experiments/rayleigh-benard) directory adds a Rayleigh-Bénard convection case trained on the Ra=1e9 buoyancy trajectories of the [Well](https://github.com/PolymathicAI/the_well) dataset. As the data is already simulated, there is no `generate.py`; the trajectories are read directly from the installed HDF5 files (see `RBCDataset` in [utils.py](experiments/rayleigh-benard/utils.py)).
+
 > The code for [Score-based Data Assimilation for a Two-Layer Quasi-Geostrophic Model](https://arxiv.org/abs/2310.01853) can be found in the `qg` branch.
 
 ## Citation

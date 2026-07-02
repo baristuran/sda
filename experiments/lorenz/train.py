@@ -11,7 +11,8 @@ from sda.utils import *
 
 from utils import *
 
-
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 GLOBAL_CONFIG = {
     # Architecture
     'embedding': 32,
@@ -36,7 +37,7 @@ LOCAL_CONFIG = {
     'activation': 'SiLU',
     # Training
     'epochs': 4096,
-    'batch_size': 64,
+    'batch_size': 512,
     'optimizer': 'AdamW',
     'learning_rate': 1e-3,
     'weight_decay': 1e-3,
@@ -44,7 +45,7 @@ LOCAL_CONFIG = {
 }
 
 
-@job(array=3, cpus=4, gpus=1, ram='8GB', time='06:00:00')
+@job(array=1, cpus=4, gpus=1, ram='32GB', time='24:00:00')
 def train_global(i: int):
     run = wandb.init(project='sda-lorenz', group='global', config=GLOBAL_CONFIG)
     runpath = PATH / f'runs/{run.name}_{run.id}'
@@ -94,7 +95,7 @@ def train_global(i: int):
     run.finish()
 
 
-@job(array=3, cpus=4, gpus=1, ram='8GB', time='06:00:00')
+@job(array=1, cpus=4, gpus=1, ram='32GB', time='24:00:00')
 def train_local(i: int):
     run = wandb.init(project='sda-lorenz', group='local', config=LOCAL_CONFIG)
     runpath = PATH / f'runs/{run.name}_{run.id}'
@@ -151,7 +152,7 @@ if __name__ == '__main__':
         train_global,
         train_local,
         name='Training',
-        backend='slurm',
+        backend='async',
         export='ALL',
         env=['export WANDB_SILENT=true'],
     )

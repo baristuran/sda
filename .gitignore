@@ -158,3 +158,23 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Image output
+*.png
+*.gif
+
+# numpy files
+*.npz
+
+# bash scripts
+*.sh
+
+# csv output
+*.csv
+
+# Checkpoints
+*.pth
+*.pt
+
+# configs
+*.json
