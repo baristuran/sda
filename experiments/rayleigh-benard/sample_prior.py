@@ -27,6 +27,7 @@ from sda.score import VPSDE
 from sda.utils import load_config
 
 from utils import *
+from vae import load_decoder
 
 
 def find_run() -> Path:
@@ -58,10 +59,13 @@ def main():
     run = find_run()
     config = load_config(run)
     coarsen = config.get('coarsen', 1)
-    H, W = HEIGHT // coarsen, WIDTH // coarsen
+    H, W = HEIGHT // coarsen, WIDTH // coarsen        # physical (output) grid
 
+    # Latent vs pixel: `decode` maps the diffusion state to a standardized pixel
+    # frame (identity for pixel runs). `(C, Hm, Wm)` is the diffusion event shape.
     score = load_score(run / 'state.pth').to(args.device).eval()
-    sde = VPSDE(score, shape=(args.length, 1, H, W)).to(args.device)
+    decode, C, Hm, Wm = load_decoder(config, args.device)
+    sde = VPSDE(score, shape=(args.length, C, Hm, Wm)).to(args.device)
 
     results = PATH / 'results'
     results.mkdir(parents=True, exist_ok=True)
@@ -80,7 +84,9 @@ def main():
         while done < args.n:
             b = min(args.batch, args.n - done)
             x = sde.sample((b,), steps=args.steps, corrections=args.corrections,
-                           tau=args.tau).cpu().numpy()
+                           tau=args.tau)                                  # (b, L, C, Hm, Wm)
+            with torch.no_grad():
+                x = decode(x).cpu().numpy()                              # (b, L, 1, H, W) std pixel
             dset[done:done + b] = destandardize(x).astype('float32')     # physical theta
             done += b
             print(f'  {done}/{args.n}', flush=True)

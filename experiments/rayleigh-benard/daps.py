@@ -46,6 +46,7 @@ from sda.score import VPSDE
 from sda.utils import TrajectoryDataset, load_config
 
 from utils import *
+from vae import load_decoder
 
 
 # ------------------------------------------------------------------ scheduler
@@ -266,8 +267,8 @@ def main():
     p.add_argument('--max-grad-norm', type=float, default=1e3, help='per-particle gradient clip')
     p.add_argument('--proj-sigma', type=float, default=0.8,
                    help='final manifold-projection noise level (<=0 disables)')
-    p.add_argument('--proj-n-ode', type=int, default=20, help='PF-ODE steps for the projection')
-    p.add_argument('--proj-n-iter', type=int, default=2, help='projection iterations')
+    p.add_argument('--proj-n-ode', type=int, default=1, help='PF-ODE steps for the projection')
+    p.add_argument('--proj-n-iter', type=int, default=1, help='projection iterations')
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--seed', type=int, default=0)
     args = p.parse_args()
@@ -279,26 +280,35 @@ def main():
     H, W = HEIGHT // coarsen, WIDTH // coarsen
     L = args.length or config['window']
 
+    # Latent vs pixel: sampling runs in the diffusion (latent) space; `decode`
+    # maps a latent trajectory to standardized pixels (identity for pixel runs).
+    # Observations stay in pixel space, so `obs_sq_fn` decodes before applying the
+    # observation operator -- the sampler's autograd then backprops the likelihood
+    # gradient through the decoder into the latent state.
     score = load_score(run / 'state.pth').to(args.device).eval()
-    sde = VPSDE(score, shape=(L, 1, H, W)).to(args.device)
-    print(f'run {run.name} (coarsen={coarsen}, grid={H}x{W}, L={L})', flush=True)
+    decode, C, Hm, Wm = load_decoder(config, args.device)
+    sde = VPSDE(score, shape=(L, C, Hm, Wm)).to(args.device)
+    print(f'run {run.name} (coarsen={coarsen}, grid={H}x{W}, L={L}, '
+          f'state=({C},{Hm},{Wm}))', flush=True)
 
-    # ground-truth test trajectory + sparse spatial observation
+    # ground-truth test trajectory + sparse spatial observation (pixel space)
     testfile = PATH / 'data/test.h5'
     with h5py.File(testfile, 'r') as f:
         x_star = torch.from_numpy(f['x'][0, :L]).to(args.device)      # (L,1,H,W) standardised
     sub = args.sub
     A = lambda x: x[..., ::sub, ::sub]
     y = torch.normal(A(x_star), args.sigma_obs)
-    obs_sq_fn = lambda x: ((A(x) - y) ** 2 / args.sigma_obs ** 2).flatten(1)
+    obs_sq_fn = lambda z: ((A(decode(z)) - y) ** 2 / args.sigma_obs ** 2).flatten(1)
 
-    x = sample_daps_envar(
-        sde, obs_sq_fn, shape=(L, 1, H, W), n_samples=args.n_samples, device=args.device,
+    z = sample_daps_envar(
+        sde, obs_sq_fn, shape=(L, C, Hm, Wm), n_samples=args.n_samples, device=args.device,
         n_anneal=args.n_anneal, n_ode=args.n_ode, n_langevin=args.n_langevin, beta=args.beta,
         n_outer=args.n_outer, prior_scale=args.prior_scale, eta_0=args.eta_0,
         max_grad_norm=args.max_grad_norm, proj_sigma=args.proj_sigma,
         proj_n_ode=args.proj_n_ode, proj_n_iter=args.proj_n_iter,
     )
+    with torch.no_grad():
+        x = decode(z)                                                # (n, L, 1, H, W) std pixel
 
     rmse = (x - x_star).square().mean().sqrt().item()
     misfit = (A(x) - y).square().mean().sqrt().item()

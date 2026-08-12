@@ -11,10 +11,12 @@ split so that training reads from memory instead.
 
     python prepare.py                 # coarsen 2 (matches train.py CONFIG)
     python prepare.py --coarsen 1     # full 128x512 resolution
+    python prepare.py --t-coarsen 2   # also downsample 2x in time (block-averaged)
 
 Output: ``PATH/data/{train,valid,test}.h5``, each with dataset ``x`` of shape
 ``(n_traj, L, 1, H, W)``, standardised, ready for
-:class:`sda.utils.TrajectoryDataset`.
+:class:`sda.utils.TrajectoryDataset`. ``L`` is the number of *decimated*-time
+frames (raw frames // ``t_coarsen``) when ``--t-coarsen`` > 1.
 """
 
 import argparse
@@ -32,6 +34,9 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--coarsen', type=int, default=2,
                    help='spatial coarsening factor (must match train.py CONFIG)')
+    p.add_argument('--t-coarsen', type=int, default=1,
+                   help='temporal coarsening factor: block-average every N raw frames '
+                        'into one (must match train.py CONFIG)')
     p.add_argument('--t-start', type=int, default=DEDALUS_T_START,
                    help='frames of initial transient to discard')
     p.add_argument('--interp', action='store_true',
@@ -47,8 +52,8 @@ def main():
     for split in ('train', 'valid', 'test'):
         ds = DedalusRBCDataset(
             split, window=None, flatten=False,
-            t_start=args.t_start, coarsen=args.coarsen, root=args.root,
-            interpolate=args.interp)
+            t_start=args.t_start, coarsen=args.coarsen, t_coarsen=args.t_coarsen,
+            root=args.root, interpolate=args.interp)
         n = len(ds)
         L, C, H, W = ds[0][0].shape
         grid = 'uniform' if args.interp else 'Chebyshev'

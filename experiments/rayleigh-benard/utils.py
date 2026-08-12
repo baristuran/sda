@@ -226,6 +226,7 @@ class DedalusRBCDataset(Dataset):
         flatten: bool = False,
         t_start: int = DEDALUS_T_START,
         coarsen: int = 1,
+        t_coarsen: int = 1,
         mean: float = DEDALUS_BUOYANCY_MEAN,
         std: float = DEDALUS_BUOYANCY_STD,
         root: str = DEDALUS_ROOT,
@@ -238,6 +239,7 @@ class DedalusRBCDataset(Dataset):
         self.flatten = flatten
         self.t_start = t_start
         self.coarsen = coarsen
+        self.t_coarsen = t_coarsen
         self.mean = mean
         self.std = std
         self.field = field
@@ -249,7 +251,9 @@ class DedalusRBCDataset(Dataset):
             raise FileNotFoundError(f'no traj_* directories under {root}')
 
         # Per trajectory: ordered (file, n_frames) layout and total length.
-        need = t_start + (window if window is not None else 1)
+        # `window` is expressed in decimated-time units; reading it needs
+        # `window * t_coarsen` raw frames.
+        need = t_start + (window if window is not None else 1) * t_coarsen
         layouts = []
         for d in dirs:
             files = sorted(glob.glob(os.path.join(d, '*_s*.h5')), key=_set_index)
@@ -275,8 +279,9 @@ class DedalusRBCDataset(Dataset):
             raise RuntimeError(
                 f'empty {split} split ({len(layouts)} usable trajectories total)')
 
-        # Common available length across the split (so full trajectories batch).
-        self.length = min(total for _, _, total in self.layouts) - t_start
+        # Common available length across the split (so full trajectories batch),
+        # in decimated-time units (raw frames // t_coarsen).
+        self.length = (min(total for _, _, total in self.layouts) - t_start) // t_coarsen
         if window is not None and window > self.length:
             raise ValueError(f"window={window} exceeds available length {self.length}")
 
@@ -313,13 +318,23 @@ class DedalusRBCDataset(Dataset):
     def __getitem__(self, i: int) -> Tuple[Tensor, Dict]:
         files, counts, total = self.layouts[i]
 
+        # `off`, `L` are in decimated-time units; `ts_raw` (start) and
+        # `L * t_coarsen` (length) convert that to the raw frame range to read.
         if self.window is None:
-            ts, L = self.t_start, self.length
+            off, L = 0, self.length
         else:
             off = int(torch.randint(0, self.length - self.window + 1, size=()))
-            ts, L = self.t_start + off, self.window
+            L = self.window
+        ts_raw = self.t_start + off * self.t_coarsen
 
-        crop = np.asarray(self._read(files, counts, ts, L), dtype=np.float32)  # (L, x, z)
+        crop = np.asarray(
+            self._read(files, counts, ts_raw, L * self.t_coarsen),
+            dtype=np.float32,
+        )  # (L * t_coarsen, x, z)
+        if self.t_coarsen > 1:
+            # Block-average raw frames down to the decimated time resolution
+            # (matches the box-filter spatial coarsening below).
+            crop = crop.reshape(L, self.t_coarsen, *crop.shape[1:]).mean(axis=1)
         if self._Mt is not None:
             crop = crop @ self._Mt                                # interpolate z -> uniform
         x = torch.from_numpy(crop).movedim(1, 2)                  # (L, z, x) = (L, H, W)
@@ -362,13 +377,29 @@ def make_score(
     hidden_blocks: Sequence[int] = (3, 3, 3),
     kernel_size: int = 3,
     activation: str = 'SiLU',
+    latent_channels: int = 1,
+    latent_height: int = None,
+    latent_width: int = None,
     **absorb,
 ) -> nn.Module:
-    height, width = HEIGHT // coarsen, WIDTH // coarsen
+    r"""Build the trajectory score network.
 
-    score = MCScoreNet(1, order=window // 2)
+    Pixel diffusion (default): ``latent_channels=1`` and no ``latent_*`` grid, so
+    the state is single-channel buoyancy on the coarsen-``coarsen`` grid --
+    identical to before. Latent diffusion: pass ``latent_channels=C_z`` and the
+    latent grid ``latent_height/latent_width`` (recorded in the run's config from
+    the VAE), giving a ``C_z``-channel state on the smaller latent grid. The
+    height context channel is still a single normalised-height map at whatever
+    grid is used.
+    """
+    if latent_height is not None and latent_width is not None:
+        height, width = latent_height, latent_width
+    else:
+        height, width = HEIGHT // coarsen, WIDTH // coarsen
+
+    score = MCScoreNet(latent_channels, order=window // 2)
     score.kernel = LocalScoreUNet(
-        channels=window,            # window * (1 buoyancy channel)
+        channels=window * latent_channels,   # window * C (folded temporal window)
         height=height,
         width=width,
         embedding=embedding,
@@ -407,18 +438,73 @@ def buoyancy2rgb(b: ArrayLike, vmin: float = -2.0, vmax: float = 2.0) -> ArrayLi
     return (256 * b[..., :3]).astype(np.uint8)
 
 
+# Below this height a colorbar rendered at the image's native height becomes a
+# short, fat box rather than a slim bar (its width is fixed by the tick/label
+# text, which does not shrink with the figure). So the colorbar height is
+# floored here and the (shorter) image is padded to match, instead of squashing
+# the bar down to the image's height.
+_CBAR_MIN_HEIGHT = 160
+
+
+def _colorbar_image(
+    vmin: float,
+    vmax: float,
+    height_px: int,
+    label: str = r'$\theta$',
+    cmap: str = 'RdBu_r',
+    dpi: int = 400,
+) -> Image.Image:
+    r"""Render a standalone vertical colorbar for the diverging buoyancy/theta
+    colormap as a PIL image at least ``_CBAR_MIN_HEIGHT`` px tall, for
+    compositing next to ``draw``/``save_gif`` output."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    # height_px = max(height_px, _CBAR_MIN_HEIGHT)
+    height_px = 75
+    fig = plt.figure(figsize=(0.3, height_px / dpi), dpi=dpi)
+    ax = fig.add_axes([0.25, 0.06, 0.28, 0.88])
+    cb = matplotlib.colorbar.ColorbarBase(
+        ax, cmap=plt.get_cmap(cmap), norm=matplotlib.colors.Normalize(vmin=vmin, vmax=vmax),
+    )
+    cb.ax.tick_params(labelsize=9)
+    cb.set_label(label, fontsize=11)
+    fig.canvas.draw()
+    buf = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+    plt.close(fig)
+
+    return Image.fromarray(buf)
+
+
+def _append_colorbar(img: Image.Image, cbar: Image.Image) -> Image.Image:
+    r"""Paste ``img`` and ``cbar`` side by side, vertically centering whichever
+    is shorter (the colorbar has a minimum height, so small frames are padded
+    rather than the colorbar being squashed to their height)."""
+    h = max(img.height, cbar.height)
+    combined = Image.new('RGB', (img.width + cbar.width, h), color=(255, 255, 255))
+    combined.paste(img, (0, (h - img.height) // 2))
+    combined.paste(cbar, (img.width, (h - cbar.height) // 2))
+    return combined
+
+
 def draw(
     w: ArrayLike,
     mask: ArrayLike = None,
     pad: int = 4,
     zoom: int = 1,
+    cbar_label: str = r'$\theta$',
     **kwargs,
 ) -> Image.Image:
     r"""Tile a grid of buoyancy frames into a single image (cf. kolmogorov.draw).
 
     An optional boolean ``mask`` greys out the unobserved cells, which is handy
-    for displaying sparse observations.
+    for displaying sparse observations. A colorbar for theta (nondimensional
+    temperature) is appended on the right unless ``colorbar=False``.
     """
+    vmin = kwargs.get('vmin', -2.0)
+    vmax = kwargs.get('vmax', 2.0)
+
     w = buoyancy2rgb(w, **kwargs)
     w = w[(None,) * (5 - w.ndim)]
 
@@ -455,12 +541,23 @@ def save_gif(
     w: ArrayLike,
     file: Path,
     dt: float = 0.2,
+    colorbar: bool = False,
+    cbar_label: str = r'$\theta$',
     **kwargs,
 ) -> None:
-    r"""Save a buoyancy trajectory ``(L, H, W)`` as an animated GIF."""
-    w = buoyancy2rgb(w, **kwargs)
+    r"""Save a buoyancy trajectory ``(L, H, W)`` as an animated GIF. A (static)
+    colorbar for theta (nondimensional temperature) is appended on the right of
+    every frame unless ``colorbar=False``."""
+    vmin = kwargs.get('vmin', -2.0)
+    vmax = kwargs.get('vmax', 2.0)
 
+    w = buoyancy2rgb(w, **kwargs)
     imgs = [Image.fromarray(img) for img in w]
+
+    if colorbar and imgs:
+        cbar = _colorbar_image(vmin, vmax, imgs[0].height, label=cbar_label)
+        imgs = [_append_colorbar(im, cbar) for im in imgs]
+
     imgs[0].save(
         file,
         save_all=True,
