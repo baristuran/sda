@@ -154,8 +154,8 @@ def evaluate(i: int = 0):
                 save_gif(x[:, 0], results / f'{tag}_{method}.gif', **vlim)
 
         # observation panel (greyed-out unobserved cells)
-        draw(x_star.cpu()[::4, 0], mask=None if mask is None else mask[::4], **vlim).save(
-            results / f'{tag}_obs.png')
+        # draw(x_star.cpu()[::4, 0], mask=None if mask is None else mask[::4], **vlim).save(
+        #     results / f'{tag}_obs.png')
 
     # -- 2a. Sparse spatial sensors (subsample H x W) ----------------------
     for sub in (4, 8):

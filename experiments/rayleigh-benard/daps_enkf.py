@@ -416,11 +416,14 @@ def main():
           f'state=({C},{Hm},{Wm}))', flush=True)
 
     # ground-truth test trajectory + sparse spatial observation (pixel space)
-    testfile = PATH / 'data/test.h5' # For validation
-    # testfile = PATH / 'data/valid.h5' # For testing
+    # testfile = PATH / 'data/test.h5' # For validation
+    testfile = PATH / 'data/valid.h5' # For testing
 
+    M = 5
+    N = 15 # Trajectory Index
     with h5py.File(testfile, 'r') as f:
-        x_star = torch.from_numpy(f['x'][0, :L]).to(args.device).float()   # (L,1,H,W) standardised
+        x_star = torch.from_numpy(f['x'][N, M*L : (M + 1)*L]).to(args.device).float()   # (L,1,H,W) standardised
+    print(f"Trajectory Index:N={N}, Time Slice Index M={M}")
     sub = args.sub
     A = lambda x: x[..., ::sub, ::sub]
     y = torch.normal(A(x_star), args.sigma_obs)                            # (L,1,H/sub,W/sub)

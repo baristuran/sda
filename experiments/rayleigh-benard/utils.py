@@ -369,6 +369,72 @@ class LocalScoreUNet(ScoreUNet):
         return super().forward(x, t, self.height)
 
 
+class LocalScoreUNet3D(nn.Module):
+    r"""3D-U-Net score kernel: time is a genuine (depth) dimension processed with
+    3D convolutions, instead of the default :class:`LocalScoreUNet`, which folds
+    the temporal window into the channel dimension and uses 2D convolutions.
+
+    The **external interface is identical** to the 2D kernel -- it maps an input
+    ``(..., T*C, H, W)`` (the window-major folded window produced by
+    ``MCScoreNet.unfold``) to an output of the same shape -- so ``MCScoreNet``'s
+    window unfold/fold and every train/inference script work unchanged; the only
+    difference is internal. Internally it un-folds the ``T*C`` channels back to a
+    ``(N, C, T, H, W)`` volume, runs a 3D U-Net that **downsamples only the two
+    spatial dimensions** (``stride=(1, 2, 2)``, so the short time window is never
+    reduced), and re-folds. A fixed normalised-height context channel is broadcast
+    over ``(T, H, W)`` exactly as in the 2D kernel.
+
+    ``features`` is the per-frame channel count ``C`` (1 for pixel, ``C_z`` for
+    latent); ``window`` is the temporal window ``T = 2*order + 1``.
+    """
+
+    def __init__(
+        self,
+        features: int,
+        window: int,
+        height: int = HEIGHT,
+        width: int = WIDTH,
+        embedding: int = 64,
+        hidden_channels: Sequence[int] = (64, 128, 256),
+        hidden_blocks: Sequence[int] = (3, 3, 3),
+        kernel_size: int = 3,
+        activation: Callable[[], nn.Module] = nn.SiLU,
+        **kwargs,
+    ):
+        super().__init__()
+
+        self.features = features
+        self.window = window
+        self.embedding = TimeEmbedding(embedding)
+        self.network = UNet(
+            in_channels=features + 1,            # + normalised-height context channel
+            out_channels=features,
+            mod_features=embedding,
+            hidden_channels=hidden_channels,
+            hidden_blocks=hidden_blocks,
+            kernel_size=kernel_size,
+            stride=(1, 2, 2),                    # downsample H, W only; keep the time window
+            activation=activation,
+            spatial=3,
+            # Zero padding: x is periodic but y has walls (as in the 2D kernel).
+        )
+
+        h = torch.linspace(-1, 1, height).reshape(1, 1, 1, height, 1)
+        self.register_buffer('height', h.expand(1, 1, window, height, width).clone())
+
+    def forward(self, x: Tensor, t: Tensor, c: Tensor = None) -> Tensor:
+        H, W = x.shape[-2:]
+        lead = x.shape[:-3]                                    # (B,) train / (B, L') compose
+        # (..., T*C, H, W) -> (N, C, T, H, W); T*C is window-major (t0c0..t0c_{C-1}, t1c0..).
+        v = x.reshape(-1, self.window, self.features, H, W).transpose(1, 2)
+        n = v.shape[0]
+        hc = self.height.expand(n, -1, -1, -1, -1)            # (N, 1, T, H, W)
+        v = torch.cat((v, hc), dim=1)                         # (N, C+1, T, H, W)
+        y = self.embedding(t.reshape(-1))                     # scalar t (compose) or (B,) (train)
+        v = self.network(v, y)                                # (N, C, T, H, W)
+        return v.transpose(1, 2).reshape(*lead, self.window * self.features, H, W)
+
+
 def make_score(
     window: int = 5,
     coarsen: int = 1,
@@ -380,6 +446,7 @@ def make_score(
     latent_channels: int = 1,
     latent_height: int = None,
     latent_width: int = None,
+    arch: str = '2d',
     **absorb,
 ) -> nn.Module:
     r"""Build the trajectory score network.
@@ -391,6 +458,14 @@ def make_score(
     the VAE), giving a ``C_z``-channel state on the smaller latent grid. The
     height context channel is still a single normalised-height map at whatever
     grid is used.
+
+    ``arch`` selects the score kernel: ``'2d'`` (default) folds the temporal
+    window into channels and uses 2D convolutions (:class:`LocalScoreUNet`) --
+    unchanged from before, so old runs (whose config has no ``arch`` key) rebuild
+    exactly as they did. ``'3d'`` keeps time as a real dimension and uses 3D
+    convolutions (:class:`LocalScoreUNet3D`); both kernels share the same
+    ``(..., window*C, H, W)`` interface, so ``MCScoreNet``, training and inference
+    are identical regardless of the choice.
     """
     if latent_height is not None and latent_width is not None:
         height, width = latent_height, latent_width
@@ -398,19 +473,34 @@ def make_score(
         height, width = HEIGHT // coarsen, WIDTH // coarsen
 
     score = MCScoreNet(latent_channels, order=window // 2)
-    score.kernel = LocalScoreUNet(
-        channels=window * latent_channels,   # window * C (folded temporal window)
-        height=height,
-        width=width,
-        embedding=embedding,
-        hidden_channels=hidden_channels,
-        hidden_blocks=hidden_blocks,
-        kernel_size=kernel_size,
-        activation=ACTIVATIONS[activation],
-        spatial=2,
-        # No circular padding: x is periodic but y has walls, so we use the
-        # default zero padding rather than wrapping the vertical boundaries.
-    )
+    if arch == '3d':
+        score.kernel = LocalScoreUNet3D(
+            features=latent_channels,
+            window=window,
+            height=height,
+            width=width,
+            embedding=embedding,
+            hidden_channels=hidden_channels,
+            hidden_blocks=hidden_blocks,
+            kernel_size=kernel_size,
+            activation=ACTIVATIONS[activation],
+        )
+    elif arch == '2d':
+        score.kernel = LocalScoreUNet(
+            channels=window * latent_channels,   # window * C (folded temporal window)
+            height=height,
+            width=width,
+            embedding=embedding,
+            hidden_channels=hidden_channels,
+            hidden_blocks=hidden_blocks,
+            kernel_size=kernel_size,
+            activation=ACTIVATIONS[activation],
+            spatial=2,
+            # No circular padding: x is periodic but y has walls, so we use the
+            # default zero padding rather than wrapping the vertical boundaries.
+        )
+    else:
+        raise ValueError(f"unknown arch {arch!r} (expected '2d' or '3d')")
 
     return score
 

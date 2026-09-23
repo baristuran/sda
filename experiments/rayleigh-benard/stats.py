@@ -9,8 +9,8 @@ trajectories on physical diagnostics of the (nondimensional) temperature field
 2. RMS-fluctuation temperature profile along z;
 3. skewness and flatness profiles of the fluctuation theta';
 4. horizontal (streamwise) power spectrum E(k_x): full depth, and separately
-   in a near-wall band and a mid-plane band;
-5. streamwise two-point correlation R(r_x), near-wall and mid-plane;
+   at a near-wall location and a mid-plane location;
+5. streamwise two-point correlation R(r_x), near-wall and mid-plane locations;
 6. thermal dissipation-rate profile  eps_theta(z) = kappa <|grad theta|^2>_{x,t};
 7. the wall Nusselt number Nu = -d<theta>/dz|_wall / (Delta_theta / LZ);
 8. the temperature PDF.
@@ -50,16 +50,22 @@ def h5_batches(path: Path, key: str, batch: int, standardized: bool):
     of shape (n, L, C, H, W), reading ``batch`` trajectories at a time."""
     with h5py.File(path, 'r') as f:
         d = f[key]
+        if standardized:
+            d = d[:, -20:]
         n = d.shape[0]
+        print(path, n, d.shape, key, standardized)
         for i in range(0, n, batch):
             x = np.asarray(d[i:i + batch])
             if standardized:
                 x = destandardize(x)
+            # if standardized:
+            #     print(x.shape)
             yield to_frames(x)
 
 
 def streaming_stats(batches, kappa: float, n_bins: int = 100,
-                    wall_frac: float = 0.1, center_frac: float = 0.1) -> dict:
+                    spec_z_wall: float = 0.03, spec_z_center: float = 0.5,
+                    fluc_z: float = 0.1) -> dict:
     r"""Diagnostics of physical theta accumulated over batches, without loading
     all frames at once. ``batches`` is a *factory* (a zero-arg callable returning
     a fresh iterator of ``(m, H, W)`` frame batches), so it can be traversed
@@ -69,38 +75,56 @@ def streaming_stats(batches, kappa: float, n_bins: int = 100,
     In addition to the mean/rms/dissipation profiles, the horizontal spectrum,
     and the PDF, this reports (i) skewness and flatness profiles of the
     fluctuation ``theta' = theta - <theta>(z)``; (ii) the horizontal spectrum and
-    two-point (streamwise) correlation resolved separately in a **near-wall** band
-    (``z`` within ``wall_frac`` of *either* wall, by up/down symmetry) and a
-    **mid-plane** band (``|z - LZ/2| <= center_frac``); and (iii) the wall
-    Nusselt number ``Nu = -d<theta>/dz|_wall / (Delta_theta / LZ)`` from the mean
-    profile at each wall.
+    two-point (streamwise) correlation at a single **near-wall** location
+    (``z/H = spec_z_wall``) and a single **mid-plane** location
+    (``z/H = spec_z_center``); and (iii) the wall Nusselt number
+    ``Nu = -d<theta>/dz|_wall / (Delta_theta / LZ)`` from the mean profile at
+    each wall.
     """
     # -- pass 1: mean profile, PDF range ----------------------------------
+    # Also track the per-height min/max of theta so the fluctuation PDF range can
+    # be fixed exactly once the mean profile is known (theta'(z) = theta - <theta>(z)
+    # attains its global extrema at min_z[z]-mean_prof[z] / max_z[z]-mean_prof[z]),
+    # without a second data pass.
     sum_z = None
     count = 0
     gmin, gmax = np.inf, -np.inf
+    min_z = max_z = None
     for b in batches():
         b = b.astype(np.float64)
         m, H, W = b.shape
         if sum_z is None:
             sum_z = np.zeros(H)
+            min_z = np.full(H, np.inf)
+            max_z = np.full(H, -np.inf)
         sum_z += b.sum(axis=(0, 2))
         count += m * W
         gmin, gmax = min(gmin, b.min()), max(gmax, b.max())
+        min_z = np.minimum(min_z, b.min(axis=(0, 2)))
+        max_z = np.maximum(max_z, b.max(axis=(0, 2)))
     if sum_z is None:
         raise ValueError('no data in stream')
     mean_prof = sum_z / count
     dz, dx = LZ / (H - 1), LX / W
     edges = np.linspace(gmin, gmax, n_bins + 1)
 
+    # fluctuation PDF at a single wall-normal location z/H = fluc_z: pick the
+    # nearest z index and fix its (exact, symmetric-about-0) bin edges from the
+    # per-height min/max at that height.
+    zi = int(round(fluc_z * (H - 1)))
+    zi = min(max(zi, 0), H - 1)
+    fz_actual = zi / (H - 1)                                 # actual z/H used
+    fl_edge_z = max(abs(min_z[zi] - mean_prof[zi]), abs(max_z[zi] - mean_prof[zi]))
+    fl_edge_z = float(fl_edge_z) if fl_edge_z > 0 else 1.0
+    edges_fz = np.linspace(-fl_edge_z, fl_edge_z, n_bins + 1)
+
     z = np.linspace(0.0, LZ, H)
-    # z-index bands (exact walls carry zero fluctuation -- Dirichlet BC -- so the
-    # near-wall band excludes them; both walls are pooled by up/down symmetry).
-    wall_mask = (((z > 0) & (z <= wall_frac * LZ)) |
-                 ((z < LZ) & (z >= LZ - wall_frac * LZ)))
-    center_mask = np.abs(z - 0.5 * LZ) <= center_frac * LZ
-    if not wall_mask.any() or not center_mask.any():
-        raise ValueError('empty wall/center band; adjust wall_frac / center_frac')
+    # single wall-normal locations for the near-wall and mid-plane spectra /
+    # two-point correlations (nearest grid index to the requested z/H).
+    zi_wall = min(max(int(round(spec_z_wall * (H - 1))), 0), H - 1)
+    zi_center = min(max(int(round(spec_z_center * (H - 1))), 0), H - 1)
+    zw_actual = zi_wall / (H - 1)                            # actual z/H used
+    zc_actual = zi_center / (H - 1)
 
     # -- pass 2: rms/skew/flat, per-z spectrum, dissipation, PDF -----------
     sumsq_z = np.zeros(H)
@@ -109,7 +133,8 @@ def streaming_stats(batches, kappa: float, n_bins: int = 100,
     grad2_sum_z = np.zeros(H)
     spec_z_sum = None                                       # (H, n_freq): sum_frames |rfft_x theta'|^2
     n_frames = 0
-    hist = np.zeros(n_bins)
+    hist = np.zeros(n_bins)               # raw theta PDF
+    hist_fz = np.zeros(n_bins)            # fluctuation theta' PDF at z/H = fluc_z
     # two-point correlation: physical-space shift accumulators, one entry per
     # streamwise lag s = 0 .. W//2 (max shift = half the domain).
     max_shift = W // 2
@@ -126,12 +151,12 @@ def streaming_stats(batches, kappa: float, n_bins: int = 100,
 
         # two-point (streamwise) correlation in PHYSICAL space: shift theta' by s
         # pixels along x (periodic -> circular roll) and accumulate the product,
-        # separately for the near-wall and mid-plane z-bands. No FFT.
-        fw = fluc[:, wall_mask, :]                          # (m, n_wall, W)
-        fc = fluc[:, center_mask, :]                        # (m, n_center, W)
+        # at the single near-wall and mid-plane z-locations. No FFT.
+        fw = fluc[:, zi_wall, :]                            # (m, W)
+        fc = fluc[:, zi_center, :]                          # (m, W)
         for s in range(max_shift + 1):
-            corr_wall_acc[s] += (fw * np.roll(fw, -s, axis=2)).sum()
-            corr_center_acc[s] += (fc * np.roll(fc, -s, axis=2)).sum()
+            corr_wall_acc[s] += (fw * np.roll(fw, -s, axis=1)).sum()
+            corr_center_acc[s] += (fc * np.roll(fc, -s, axis=1)).sum()
 
         bx = b - b.mean(axis=2, keepdims=True)              # remove k=0 (horiz. mean)
         F2 = np.abs(np.fft.rfft(bx, axis=2)) ** 2           # (m, H, n_freq)
@@ -145,6 +170,7 @@ def streaming_stats(batches, kappa: float, n_bins: int = 100,
         grad2_sum_z += (dbdx ** 2 + dbdz ** 2).sum(axis=(0, 2))
 
         hist += np.histogram(b.ravel(), bins=edges)[0]
+        hist_fz += np.histogram(fluc[:, zi, :].ravel(), bins=edges_fz)[0]
 
     # -- profiles ---------------------------------------------------------
     var_z = sumsq_z / count
@@ -153,12 +179,12 @@ def streaming_stats(batches, kappa: float, n_bins: int = 100,
         skew_prof = np.where(var_z > 1e-12, (sum3_z / count) / var_z ** 1.5, np.nan)
         flat_prof = np.where(var_z > 1e-12, (sum4_z / count) / var_z ** 2, np.nan)
 
-    # -- spectra: full depth, near wall, mid-plane ------------------------
+    # -- spectra: full depth, near-wall location, mid-plane location ------
     k = 2.0 * np.pi * np.fft.rfftfreq(W, d=dx)
     W2 = float(W ** 2)
-    power = spec_z_sum.sum(axis=0) / (n_frames * H) / W2                  # full-depth avg
-    power_wall = spec_z_sum[wall_mask].mean(axis=0) / n_frames / W2       # near-wall band avg
-    power_center = spec_z_sum[center_mask].mean(axis=0) / n_frames / W2   # mid-plane band avg
+    power = spec_z_sum.sum(axis=0) / (n_frames * H) / W2       # full-depth avg
+    power_wall = spec_z_sum[zi_wall] / n_frames / W2           # near-wall location
+    power_center = spec_z_sum[zi_center] / n_frames / W2       # mid-plane location
 
     # -- two-point (streamwise) correlation R(r_x): physical space --------
     # accumulated above by shifting theta' along x up to W//2 pixels (= LX/2);
@@ -184,9 +210,16 @@ def streaming_stats(batches, kappa: float, n_bins: int = 100,
     nu_top = float(-g_top / ref)
     nu_wall = 0.5 * (nu_bot + nu_top)
 
-    # -- PDF --------------------------------------------------------------
+    # -- PDFs: raw theta and fluctuation theta' = theta - <theta>(z) -------
     centers = 0.5 * (edges[:-1] + edges[1:])
     pdf = hist / (hist.sum() * (edges[1] - edges[0]))        # density
+    # fluctuation PDF at z/H = fluc_z, normalized by the local rms: the abscissa
+    # is theta'/theta_rms(z) and the density is scaled by theta_rms(z) so it still
+    # integrates to 1 (change of variables y = theta'/rms). Binning was done in
+    # physical units, so we just rescale centers and density here.
+    rms_z = float(rms_prof[zi]) if rms_prof[zi] > 0 else 1.0
+    centers_fz = 0.5 * (edges_fz[:-1] + edges_fz[1:]) / rms_z
+    pdf_fluc_z = hist_fz / (hist_fz.sum() * (edges_fz[1] - edges_fz[0])) * rms_z
 
     return dict(z=z, mean_prof=mean_prof, rms_prof=rms_prof,
                 skew_prof=skew_prof, flat_prof=flat_prof,
@@ -195,7 +228,8 @@ def streaming_stats(batches, kappa: float, n_bins: int = 100,
                 eps_prof=eps_prof, eps_mean=eps_mean,
                 nu_bot=nu_bot, nu_top=nu_top, nu_wall=nu_wall,
                 pdf_x=centers, pdf=pdf,
-                wall_frac=wall_frac, center_frac=center_frac)
+                pdf_fluc_z_x=centers_fz, pdf_fluc_z=pdf_fluc_z, fluc_z=fz_actual,
+                spec_z_wall=zw_actual, spec_z_center=zc_actual)
 
 
 def to_frames(x: np.ndarray) -> np.ndarray:
@@ -259,10 +293,10 @@ def plot(sp: dict, sg: dict, outdir: Path) -> list:
           r'horizontal wavenumber $k_x$', r'$E(k_x)$', r'horizontal $\theta$ spectrum')
     panel('stat_theta_spectrum_wall.png', _spec_key('power_wall'),
           r'horizontal wavenumber $k_x$', r'$E(k_x)$',
-          rf"near-wall $\theta$ spectrum ($z$ within {sg['wall_frac']:.2f} of a wall)")
+          rf"near-wall $\theta$ spectrum ($z/H={sg['spec_z_wall']:.2f}$)")
     panel('stat_theta_spectrum_center.png', _spec_key('power_center'),
           r'horizontal wavenumber $k_x$', r'$E(k_x)$',
-          rf"mid-plane $\theta$ spectrum ($|z-{LZ/2:.1f}|\leq{sg['center_frac']:.2f}$)")
+          rf"mid-plane $\theta$ spectrum ($z/H={sg['spec_z_center']:.2f}$)")
 
     # skewness and flatness profiles of theta' (Gaussian references: 0 and 3)
     def _skew(a):
@@ -289,9 +323,11 @@ def plot(sp: dict, sg: dict, outdir: Path) -> list:
             a.axhline(0.0, color='k', lw=0.6, ls=':')
         return f
     panel('stat_two_point_corr_wall.png', _corr_key('corr_wall'),
-          r'separation $r_x$', r'$R(r_x)$', r'near-wall two-point correlation')
+          r'separation $r_x$', r'$R(r_x)$',
+          rf"near-wall two-point correlation ($z/H={sg['spec_z_wall']:.2f}$)")
     panel('stat_two_point_corr_center.png', _corr_key('corr_center'),
-          r'separation $r_x$', r'$R(r_x)$', r'mid-plane two-point correlation')
+          r'separation $r_x$', r'$R(r_x)$',
+          rf"mid-plane two-point correlation ($z/H={sg['spec_z_center']:.2f}$)")
 
     # thermal dissipation profile
     def _eps(a):
@@ -307,6 +343,14 @@ def plot(sp: dict, sg: dict, outdir: Path) -> list:
         a.semilogy(sp['pdf_x'], sp['pdf'], cp, label='prior')
     panel('stat_theta_pdf.png', _pdf, r'$\theta$', 'pdf', r'$\theta$ PDF')
 
+    # rms-normalized fluctuation PDF at a single wall-normal location z/H = fluc_z
+    def _pdf_fluc_z(a):
+        a.semilogy(sg['pdf_fluc_z_x'], sg['pdf_fluc_z'], cg, label='truth')
+        a.semilogy(sp['pdf_fluc_z_x'], sp['pdf_fluc_z'], cp, label='prior')
+    panel('stat_theta_fluc_pdf_z.png', _pdf_fluc_z,
+          r"$\theta' / \theta'_{\mathrm{rms}}(z)$", 'pdf',
+          rf"normalized $\theta'$ fluctuation PDF at $z/H={sg['fluc_z']:.2f}$")
+
     return paths
 
 
@@ -320,11 +364,12 @@ def main():
     p.add_argument('--bins', type=int, default=100, help='PDF histogram bins')
     p.add_argument('--rayleigh', type=float, default=1e7)
     p.add_argument('--prandtl', type=float, default=1.0)
-    p.add_argument('--wall-frac', type=float, default=0.1,
-                   help='near-wall band half-width (fraction of LZ from each wall) '
-                        'for the wall spectrum / two-point correlation')
-    p.add_argument('--center-frac', type=float, default=0.1,
-                   help='mid-plane band half-width (fraction of LZ about z=LZ/2)')
+    p.add_argument('--spec-z-wall', type=float, default=0.03,
+                   help='near-wall location z/H for the wall spectrum / two-point correlation')
+    p.add_argument('--spec-z-center', type=float, default=0.5,
+                   help='mid-plane location z/H for the center spectrum / two-point correlation')
+    p.add_argument('--fluc-z', type=float, default=0.03,
+                   help='wall-normal location z/H for the single-height fluctuation PDF')
     p.add_argument('--out-path', type=str, default="resuts_deneme/stats/posterior")
     args = p.parse_args()
 
@@ -333,13 +378,13 @@ def main():
     results.mkdir(parents=True, exist_ok=True)
 
     priorfile = Path(args.prior_file) if args.prior_file else results / 'prior_fields.h5'
-    testfile = PATH / 'data_coarsened_in_time/test.h5'
+    testfile = PATH / 'data/test.h5'
     for f in (priorfile, testfile):
         if not f.exists():
             raise SystemExit(f"missing {f} (run sample_prior.py / prepare.py --interp first)")
 
     # Stream both sources in batches; nothing is fully loaded into memory.
-    kw = dict(wall_frac=args.wall_frac, center_frac=args.center_frac)
+    kw = dict(spec_z_wall=args.spec_z_wall, spec_z_center=args.spec_z_center, fluc_z=args.fluc_z)
     sg = streaming_stats(lambda: h5_batches(testfile, 'x', args.batch, standardized=True),
                          kappa, args.bins, **kw)
     sp = streaming_stats(lambda: h5_batches(priorfile, 'theta', args.batch, standardized=False),

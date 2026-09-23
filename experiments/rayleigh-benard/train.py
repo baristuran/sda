@@ -18,12 +18,17 @@ from utils import *
 
 CONFIG = {
     # Architecture
-    'window': 5,
-    'embedding': 64,
-    'hidden_channels': (64, 128, 256),
-    'hidden_blocks': (3, 3, 3),
+    'window': 25,
+    'embedding': 32,
+    # 'hidden_channels': (64, 128, 256),
+    # 'hidden_blocks': (3, 3, 3),
+    'hidden_channels': (32, 64),
+    'hidden_blocks': (4, 6),
     'kernel_size': 3,
     'activation': 'SiLU',
+    # Score kernel: '2d' folds the temporal window into channels (default, the
+    # original architecture); '3d' keeps time as a real dimension via a 3D U-Net.
+    'arch': '3d',
     # Data
     'coarsen': 1,            # 512x128 -> 256x64 to keep memory/compute tractable
     't_coarsen': 1,          # temporal downsampling factor (must match prepare.py); 1 = off

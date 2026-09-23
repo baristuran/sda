@@ -16,7 +16,7 @@ Usage:
 
 import argparse
 import os
-
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 import h5py
 import numpy as np
 import torch
