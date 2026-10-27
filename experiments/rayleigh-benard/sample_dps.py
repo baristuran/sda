@@ -146,8 +146,8 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         out,
-        posterior=destandardize(x_all.numpy()),                         # (N, L, 1, H, W)
-        truth=destandardize(x_star.cpu().numpy()),                      # (L, 1, H, W)
+        posterior=destandardize(x_all.numpy(), testfile.parent),                         # (N, L, 1, H, W)
+        truth=destandardize(x_star.cpu().numpy(), testfile.parent),                      # (L, 1, H, W)
         sub=sub,
     )
     print(f'saved DPS ensemble ({N} samples) -> {out}', flush=True)

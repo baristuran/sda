@@ -146,16 +146,46 @@ class RBCDataset(Dataset):
         return x, {}
 
 
-def destandardize(x: ArrayLike) -> ArrayLike:
-    r"""Map a standardised buoyancy field back to physical units."""
-    return np.asarray(x) * BUOYANCY_STD + BUOYANCY_MEAN
+# -- Standardisation statistics --------------------------------------------
+# prepare.py computes the buoyancy mean/std over the TRAIN split and writes them
+# to <data dir>/normalization.txt; everything that standardises or
+# destandardises reads them back from there, so they are never hard-coded.
+NORMALIZATION_FILE = 'normalization.txt'
+
+
+def save_normalization(datadir: Path, mean: float, std: float) -> Path:
+    path = Path(datadir) / NORMALIZATION_FILE
+    path.write_text(
+        '# buoyancy standardisation, train split: x_std = (theta - mean) / std\n'
+        f'mean {mean!r}\n'
+        f'std {std!r}\n')
+    return path
+
+
+def load_normalization(datadir: Path = None) -> Tuple[float, float]:
+    r"""Read ``(mean, std)`` from ``<datadir>/normalization.txt`` (default:
+    ``PATH/data``)."""
+    path = Path(datadir if datadir is not None else PATH / 'data') / NORMALIZATION_FILE
+    if not path.exists():
+        raise FileNotFoundError(f'{path} not found; run prepare.py to create it')
+    values = {}
+    for line in path.read_text().splitlines():
+        line = line.split('#', 1)[0].split()
+        if len(line) == 2:
+            values[line[0]] = float(line[1])
+    return values['mean'], values['std']
+
+
+def destandardize(x: ArrayLike, datadir: Path = None) -> ArrayLike:
+    r"""Map a standardised buoyancy field back to physical units, with the
+    statistics in ``<datadir>/normalization.txt`` (default: ``PATH/data``)."""
+    mean, std = load_normalization(datadir)
+    return np.asarray(x) * std + mean
 
 
 # -- Locally-simulated Dedalus dataset -------------------------------------
 DEDALUS_ROOT = os.environ.get('DEDALUS_ROOT', '/home/baris-turan/dedalus/snapshots')
 DEDALUS_T_START = 80            # discard the initial transient (frames 0 .. T_START-1)
-DEDALUS_BUOYANCY_MEAN = 0.4993  # stationary-regime standardisation
-DEDALUS_BUOYANCY_STD = 0.2053
 DEDALUS_SPLIT = {'train': (0.0, 0.8), 'valid': (0.8, 0.9), 'test': (0.9, 1.0)}
 DEDALUS_LZ = 1.0               # box height (z in [0, Lz]); must match the solver
 
@@ -208,10 +238,12 @@ class DedalusRBCDataset(Dataset):
     (``traj_XXXX_sN.h5``, 50 frames each) that concatenate along time into a
     full ~200-step trajectory. We model the ``tasks/buoyancy`` field, oriented as
     ``(H=z, W=x)`` to match :class:`RBCDataset`, discard the initial transient
-    and standardise. Trajectories are split into train/valid/test by index.
+    and standardise with ``(x - mean) / std`` (default ``mean=0, std=1``: raw
+    buoyancy; ``prepare.py`` standardises with the statistics in
+    ``normalization.txt``). Trajectories are split into train/valid/test by index.
 
     Same interface as :class:`RBCDataset` / :class:`sda.utils.TrajectoryDataset`:
-    each item is a standardised ``(L, C, H, W)`` trajectory (a random
+    each item is a ``(L, C, H, W)`` trajectory (a random
     ``window``-length slice when ``window`` is given), flattened to
     ``(window * C, H, W)`` when ``flatten`` is set. Windows straddling two
     snapshot files are read transparently across the boundary. Files are read
@@ -227,8 +259,8 @@ class DedalusRBCDataset(Dataset):
         t_start: int = DEDALUS_T_START,
         coarsen: int = 1,
         t_coarsen: int = 1,
-        mean: float = DEDALUS_BUOYANCY_MEAN,
-        std: float = DEDALUS_BUOYANCY_STD,
+        mean: float = 0.0,
+        std: float = 1.0,
         root: str = DEDALUS_ROOT,
         field: str = 'buoyancy',
         interpolate: bool = False,

@@ -122,8 +122,8 @@ def evaluate(i: int = 0):
     # # (= nondimensional temperature), for downstream statistical analysis.
     np.savez(
         results / 'prior_fields.npz',
-        prior=destandardize(x.numpy()),                  # (n, L, 1, H, W)
-        truth=destandardize(x_star.cpu().numpy()),       # (L, 1, H, W)
+        prior=destandardize(x.numpy(), testfile.parent),                  # (n, L, 1, H, W)
+        truth=destandardize(x_star.cpu().numpy(), testfile.parent),       # (L, 1, H, W)
     )
     print('saved ground truth + prior samples (+ prior_fields.npz)', flush=True)
   
@@ -208,8 +208,8 @@ def evaluate(i: int = 0):
 
         np.savez(
             results / f'dps_sub{sub}_{i:04d}.npz',
-            posterior=destandardize(x_dps.numpy()),          # (N, L, 1, H, W)
-            truth=destandardize(x_star.cpu().numpy()),       # (L, 1, H, W)
+            posterior=destandardize(x_dps.numpy(), testfile.parent),          # (N, L, 1, H, W)
+            truth=destandardize(x_star.cpu().numpy(), testfile.parent),       # (L, 1, H, W)
             sub=sub,
         )
         print(f'saved DPS ensemble -> {results}/dps_sub{sub}_{i:04d}.npz', flush=True)

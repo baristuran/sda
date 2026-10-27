@@ -17,6 +17,11 @@ Output: ``PATH/data/{train,valid,test}.h5``, each with dataset ``x`` of shape
 ``(n_traj, L, 1, H, W)``, standardised, ready for
 :class:`sda.utils.TrajectoryDataset`. ``L`` is the number of *decimated*-time
 frames (raw frames // ``t_coarsen``) when ``--t-coarsen`` > 1.
+
+Standardisation is ``(theta - mean) / std`` with the mean and std of the TRAIN
+split, stored in ``<out>/normalization.txt``. If that file already exists it is
+reused and nothing is recomputed (delete it to recompute); every script that
+converts back to physical units (``utils.destandardize``) reads it.
 """
 
 import argparse
@@ -49,8 +54,15 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    # Standardisation statistics: reuse <out>/normalization.txt if it exists,
+    # otherwise compute them over the train split (processed first, below).
+    norm = None
+    if (out / NORMALIZATION_FILE).exists():
+        norm = load_normalization(out)
+        print(f'using {out / NORMALIZATION_FILE}: mean={norm[0]:.6g} std={norm[1]:.6g}', flush=True)
+
     for split in ('train', 'valid', 'test'):
-        ds = DedalusRBCDataset(
+        ds = DedalusRBCDataset(                                   # raw buoyancy
             split, window=None, flatten=False,
             t_start=args.t_start, coarsen=args.coarsen, t_coarsen=args.t_coarsen,
             root=args.root, interpolate=args.interp)
@@ -62,8 +74,26 @@ def main():
         path = out / f'{split}.h5'
         with h5py.File(path, 'w') as f:
             dset = f.create_dataset('x', shape=(n, L, C, H, W), dtype=np.float32)
-            for i in range(n):
-                dset[i] = ds[i][0].numpy()
+            if norm is not None:
+                mean, std = norm
+                for i in range(n):
+                    dset[i] = (ds[i][0].numpy() - mean) / std
+            else:
+                # Write raw while accumulating the statistics (one read of the
+                # slow Dedalus files), then standardise the file in place.
+                count, s, s2 = 0, 0.0, 0.0
+                for i in range(n):
+                    x = ds[i][0].numpy()
+                    dset[i] = x
+                    x = x.astype(np.float64)
+                    count, s, s2 = count + x.size, s + x.sum(), s2 + np.square(x).sum()
+                mean = s / count
+                std = float(np.sqrt(s2 / count - mean ** 2))
+                norm = (float(mean), std)
+                print(f'  computed train statistics: mean={norm[0]:.6g} std={norm[1]:.6g} '
+                      f'-> {save_normalization(out, *norm)}', flush=True)
+                for i in range(n):
+                    dset[i] = (dset[i] - norm[0]) / norm[1]
         print(f'  wrote {path}', flush=True)
 
 

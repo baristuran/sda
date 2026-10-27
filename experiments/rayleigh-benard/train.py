@@ -16,35 +16,45 @@ from sda.utils import *
 from utils import *
 
 
-CONFIG = {
-    # Architecture
-    'window': 25,
-    'embedding': 32,
-    # 'hidden_channels': (64, 128, 256),
-    # 'hidden_blocks': (3, 3, 3),
-    'hidden_channels': (32, 64),
-    'hidden_blocks': (4, 6),
-    'kernel_size': 3,
-    'activation': 'SiLU',
-    # Score kernel: '2d' folds the temporal window into channels (default, the
-    # original architecture); '3d' keeps time as a real dimension via a 3D U-Net.
-    'arch': '3d',
-    # Data
-    'coarsen': 1,            # 512x128 -> 256x64 to keep memory/compute tractable
-    't_coarsen': 1,          # temporal downsampling factor (must match prepare.py); 1 = off
-    # Latent diffusion: set to a VAE run name (under runs_vae) to train on VAE
-    # latents from data_latent/ instead of pixels. None = pixel diffusion (default).
-    'vae_run': "vae_1786432980",
-    # Training
-    'epochs': 4096,
-    'batch_size': 128,
-    'optimizer': 'AdamW',
-    'learning_rate': 2e-4,
-    'weight_decay': 1e-3,
-    'scheduler': 'exponential',
-    'num_workers': 4,
-}
+# CONFIG = {
+#     # Architecture
+#     'window': 25,
+#     'embedding': 32,
+#     # 'hidden_channels': (64, 128, 256),
+#     # 'hidden_blocks': (3, 3, 3),
+#     'hidden_channels': (32, 64),
+#     'hidden_blocks': (4, 6),
+#     'kernel_size': 3,
+#     'activation': 'SiLU',
+#     # Score kernel: '2d' folds the temporal window into channels (default, the
+#     # original architecture); '3d' keeps time as a real dimension via a 3D U-Net.
+#     'arch': '3d',
+#     # Data
+#     'coarsen': 1,            # 512x128 -> 256x64 to keep memory/compute tractable
+#     't_coarsen': 1,          # temporal downsampling factor (must match prepare.py); 1 = off
+#     # Latent diffusion: set to a VAE run name (under runs_vae) to train on VAE
+#     # latents from data_latent/ instead of pixels. None = pixel diffusion (default).
+#     'vae_run': "vae_1786432980",
+#     # Training
+#     'epochs': 4096,
+#     'batch_size': 128,
+#     'optimizer': 'AdamW',
+#     'learning_rate': 2e-4,
+#     'weight_decay': 1e-3,
+#     'scheduler': 'exponential',
+#     'num_workers': 4,
+# }
 
+CONFIG={"window": 7, "embedding": 64, 
+        "hidden_channels": [64, 128, 256], 
+        "hidden_blocks": [3, 3, 3], "kernel_size": 3, 
+        "activation": "SiLU", "coarsen": 2, 
+        "epochs": 4096, "batch_size": 128, 
+        "optimizer": "AdamW", 
+        "learning_rate": 0.0002, 
+        "weight_decay": 0.001, 
+        "scheduler": "exponential",
+        "num_workers": 4}
 
 @job(array=1, cpus=4, gpus=3, ram='32GB', time='24:00:00')
 def train(i: int):
@@ -68,7 +78,7 @@ def train(i: int):
         datadir = PATH / 'data_latent_beta_1e-5'
     else:
         channels, height, width = 1, HEIGHT // coarsen, WIDTH // coarsen
-        datadir = PATH / 'data'
+        datadir = PATH / 'data_longer'
 
     # Data: consolidated, contiguous HDF5 loaded into memory by TrajectoryDataset.
     # Pixel: run `python prepare.py --coarsen N --t-coarsen M` first. Latent: run

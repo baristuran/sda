@@ -84,7 +84,7 @@ Run as a script to assimilate a sparse spatial observation of a test trajectory:
 from __future__ import annotations
 
 import os
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
 import argparse
 
@@ -382,6 +382,8 @@ def main():
     p.add_argument('--length', type=int, default=None, help='trajectory length (default: model window)')
     p.add_argument('--sub', type=int, default=8, help='sparse spatial subsampling factor')
     p.add_argument('--sigma-obs', type=float, default=0.1)
+    p.add_argument('--split', type=str, default="valid")
+
     p.add_argument('--n-anneal', type=int, default=400)
     p.add_argument('--n-ode', type=int, default=6)
     p.add_argument('--n-esmda', type=int, default=1,
@@ -415,15 +417,22 @@ def main():
     print(f'run {run.name} (coarsen={coarsen}, grid={H}x{W}, L={L}, '
           f'state=({C},{Hm},{Wm}))', flush=True)
 
-    # ground-truth test trajectory + sparse spatial observation (pixel space)
-    # testfile = PATH / 'data/test.h5' # For validation
-    testfile = PATH / 'data/valid.h5' # For testing
+    # # ground-truth test trajectory + sparse spatial observation (pixel space)
+    # #------------ Old dataset ---------------------------------
+    # # testfile = PATH / 'data/test.h5' # For validation
+    # testfile = PATH / 'data/valid.h5' # For testing
+
+    #------------- New Dataset --------------------------------
+
+    testfile = PATH / f'data_longer/{args.split}.h5' # For validation
+    # testfile = PATH / 'data_longer/test.h5' # For testing
 
     M = 5
-    N = 15 # Trajectory Index
+    N = 0 # Trajectory Index
     with h5py.File(testfile, 'r') as f:
         x_star = torch.from_numpy(f['x'][N, M*L : (M + 1)*L]).to(args.device).float()   # (L,1,H,W) standardised
     print(f"Trajectory Index:N={N}, Time Slice Index M={M}")
+    print(f"Test file:{testfile.name}")
     sub = args.sub
     A = lambda x: x[..., ::sub, ::sub]
     y = torch.normal(A(x_star), args.sigma_obs)                            # (L,1,H/sub,W/sub)
@@ -458,8 +467,8 @@ def main():
     results = PATH / args.out_path
     results.mkdir(parents=True, exist_ok=True)
     tag = 'daps_enkf_safe' if args.safe else 'daps_enkf'
-    xb = destandardize(x.cpu().numpy())
-    tb = destandardize(x_star.cpu().numpy())
+    xb = destandardize(x.cpu().numpy(), testfile.parent)
+    tb = destandardize(x_star.cpu().numpy(), testfile.parent)
     np.savez(results / f'{tag}.npz', posterior=xb, truth=tb, sub=sub)
     gt = x_star.detach().cpu()
     vmin = float(gt.mean() - torch.quantile((gt - gt.mean()).abs(), 0.99))

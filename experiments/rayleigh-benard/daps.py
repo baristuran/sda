@@ -316,8 +316,8 @@ def main():
 
     results = PATH / 'results'
     results.mkdir(parents=True, exist_ok=True)
-    xb = destandardize(x.cpu().numpy())
-    tb = destandardize(x_star.cpu().numpy())
+    xb = destandardize(x.cpu().numpy(), testfile.parent)
+    tb = destandardize(x_star.cpu().numpy(), testfile.parent)
     np.savez(results / 'daps_envar.npz', posterior=xb, truth=tb, sub=sub)
     gt = x_star.detach().cpu()
     vmin = float(gt.mean() - torch.quantile((gt - gt.mean()).abs(), 0.99))

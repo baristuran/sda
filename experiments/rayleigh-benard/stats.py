@@ -50,14 +50,14 @@ def h5_batches(path: Path, key: str, batch: int, standardized: bool):
     of shape (n, L, C, H, W), reading ``batch`` trajectories at a time."""
     with h5py.File(path, 'r') as f:
         d = f[key]
-        if standardized:
-            d = d[:, -20:]
+        # if standardized:
+            # d = d[:, -20:]
         n = d.shape[0]
         print(path, n, d.shape, key, standardized)
         for i in range(0, n, batch):
             x = np.asarray(d[i:i + batch])
             if standardized:
-                x = destandardize(x)
+                x = destandardize(x, Path(path).parent)
             # if standardized:
             #     print(x.shape)
             yield to_frames(x)
@@ -378,7 +378,7 @@ def main():
     results.mkdir(parents=True, exist_ok=True)
 
     priorfile = Path(args.prior_file) if args.prior_file else results / 'prior_fields.h5'
-    testfile = PATH / 'data/test.h5'
+    testfile = PATH / 'data_longer/test.h5'
     for f in (priorfile, testfile):
         if not f.exists():
             raise SystemExit(f"missing {f} (run sample_prior.py / prepare.py --interp first)")

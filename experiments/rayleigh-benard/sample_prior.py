@@ -3,21 +3,23 @@ r"""Generate a large set of unconditional (prior) sample trajectories in
 batches, writing them incrementally to a preallocated HDF5 file.
 
 Generating ~100 trajectories in a single batch runs the GPU out of memory, so
-this pre-creates the output file at its final size and fills it a batch at a
-time. Output is physical buoyancy = nondimensional temperature ``theta``.
+they are generated a batch at a time. Output is physical buoyancy =
+nondimensional temperature ``theta``.
 
-Output: ``results/prior_fields.h5`` with dataset ``theta`` of shape
-(n, length, 1, H, W), consumed by ``stats.py``.
+Output, in ``--out-path`` (default ``results/``):
+    prior_fields.npz   key ``prior`` of shape (n, length, 1, H, W)
+    prior_sample.gif   the first generated trajectory
+
+For the statistics: ``./compute_stats.sh <out>/prior_fields.npz <stats dir> --key prior``.
 
 Usage:
     python sample_prior.py --n 100 --batch 8 --length 50
-    RBC_RUN=<run-name> python sample_prior.py --n 100 --batch 4 --steps 256
+    RBC_RUN=<run-name> python sample_prior.py --n 100 --batch 4 --steps 256 --out-path results_prior
 """
 
 import argparse
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
-import h5py
 import numpy as np
 import torch
 
@@ -49,7 +51,8 @@ def main():
     p.add_argument('--steps', type=int, default=256, help='reverse-diffusion steps')
     p.add_argument('--corrections', type=int, default=1, help='Langevin corrections / step')
     p.add_argument('--tau', type=float, default=0.5)
-    p.add_argument('--out', default=None, help='output .h5 (default results/prior_fields.h5)')
+    p.add_argument('--out-path', default='results',
+                   help='output directory for prior_fields.npz and prior_sample.gif')
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--seed', type=int, default=0)
     args = p.parse_args()
@@ -60,6 +63,7 @@ def main():
     config = load_config(run)
     coarsen = config.get('coarsen', 1)
     H, W = HEIGHT // coarsen, WIDTH // coarsen        # physical (output) grid
+    datadir = PATH / 'data_longer'
 
     # Latent vs pixel: `decode` maps the diffusion state to a standardized pixel
     # frame (identity for pixel runs). `(C, Hm, Wm)` is the diffusion event shape.
@@ -67,31 +71,32 @@ def main():
     decode, C, Hm, Wm = load_decoder(config, args.device)
     sde = VPSDE(score, shape=(args.length, C, Hm, Wm)).to(args.device)
 
-    results = PATH / 'results'
+    results = PATH / args.out_path
     results.mkdir(parents=True, exist_ok=True)
-    out = Path(args.out) if args.out else results / 'prior_fields.h5'
 
     print(f'generating {args.n} trajectories from {run.name} '
           f'(coarsen={coarsen}, grid={H}x{W}) in batches of {args.batch}', flush=True)
 
-    # Pre-create the file at its final size (contiguous dataset), then fill slices.
-    with h5py.File(out, 'w') as f:
-        dset = f.create_dataset('theta', shape=(args.n, args.length, 1, H, W), dtype='float32')
-        dset.attrs['run'] = run.name
-        dset.attrs['coarsen'] = coarsen
+    chunks, done = [], 0
+    while done < args.n:
+        b = min(args.batch, args.n - done)
+        x = sde.sample((b,), steps=args.steps, corrections=args.corrections,
+                       tau=args.tau)                                      # (b, L, C, Hm, Wm)
+        with torch.no_grad():
+            chunks.append(decode(x).cpu())                               # (b, L, 1, H, W) std pixel
+        done += b
+        print(f'  {done}/{args.n}', flush=True)
+    x = torch.cat(chunks)                                                # (n, L, 1, H, W) std pixel
 
-        done = 0
-        while done < args.n:
-            b = min(args.batch, args.n - done)
-            x = sde.sample((b,), steps=args.steps, corrections=args.corrections,
-                           tau=args.tau)                                  # (b, L, C, Hm, Wm)
-            with torch.no_grad():
-                x = decode(x).cpu().numpy()                              # (b, L, 1, H, W) std pixel
-            dset[done:done + b] = destandardize(x).astype('float32')     # physical theta
-            done += b
-            print(f'  {done}/{args.n}', flush=True)
-
-    print(f'saved -> {out}', flush=True)
+    np.savez(results / 'prior_fields.npz',
+             prior=destandardize(x.numpy(), datadir).astype('float32'),  # physical theta
+             run=run.name, coarsen=coarsen)
+    # colour range as in daps_enkf.py, from the first trajectory (no ground truth here)
+    x0 = x[0, :, 0]
+    half = float(np.quantile((x0 - x0.mean()).abs().numpy(), 0.99))
+    vmin, vmax = float(x0.mean()) - half, float(x0.mean()) + half
+    save_gif(x0, results / 'prior_sample.gif', vmin=vmin, vmax=vmax)
+    print(f'saved -> {results / "prior_fields.npz"}, prior_sample.gif', flush=True)
 
 
 if __name__ == '__main__':
